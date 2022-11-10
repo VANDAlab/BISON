@@ -6,3 +6,11 @@ Accurate differentiation of brain tissue types from MR images  is necessary in m
 Execution Example:
 
 python BISON.py -c RF -m Trained_Classifiers/ -o Outputs/ -t Temp_Files/ -e PT -n List.csv -p Trained_Classifiers/ -l 3
+
+This version of the pipeline is also available at: https://nist.mni.mcgill.ca/tissue-classification/
+
+
+Reference:
+Dadar, M., & Collins, D. L. (2021). BISON: Brain tissue segmentation pipeline using T1‐weighted magnetic resonance images and a random forest classifier. Magnetic Resonance in Medicine, 85(4), 1881-1894.
+
+
