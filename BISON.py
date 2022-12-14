@@ -1,12 +1,23 @@
 # -*- coding: utf-8 -*-
+import os
+import numpy as np
+import sys
+import getopt
+import SimpleITK as sitk
+
+try:
+    import joblib
+except ModuleNotFoundError:
+    # for old scikit-learn
+    from sklearn.externals import joblib
+import tempfile
+
 """
 Created on Wed Jul 23 12:43:32 2019
 ######################################################################################################################################
 Copyright (c)  2019 Mahsa Dadar, Louis Collins
-Developed and validated using Python 2.7.13 :: Anaconda 2.5.0 (64-bit)
-Other necessary Installations: https://github.com/BIC-MNI/pyezminc, minc-toolkit-v2 
 
-Script for Tissue Segmentation from T1-w images
+Script for Tissue Segmentation from T1-w, T2-w, PD, and FLAIR images
 This version of the pipeline has the option to perform its own preprocessing and works with .nii images.
 The pipeline provides the option of using other classifiers, but is has been tested and validated with random forests 
 Input arguments:
@@ -47,8 +58,44 @@ Classifier Options:
 #####################################################################################################################################
 @author: mdadar
 """
+
+def run_command(cmd_line):
+    """
+    Execute command and check the return status
+    throw an exception if command failed
+    """
+    r=os.system(cmd_line)
+    if r!=0:
+        raise OSError(r,cmd_line)
+
+
+#DEBUG
+def draw_histograms(hist,out,modality='',dpi=100 ):
+    import matplotlib
+    matplotlib.use('AGG')
+    import matplotlib.pyplot as plt
+    import matplotlib.cm  as cmx
+    import matplotlib.colors as colors
+    
+
+    fig = plt.figure()
+
+    x=np.arange(hist.shape[0])
+    for c in range(hist.shape[1]):
+        plt.plot(x, hist[:,c], label=f'{c+1}')  # Plot some data on the (implicit) axes.
+
+    plt.xlabel('Intensity')
+    plt.ylabel('Density')
+    plt.legend()
+    if modality is not None:
+        plt.title(modality)
+
+    plt.savefig(out, bbox_inches='tight', dpi=dpi)
+    plt.close()
+    plt.close('all')
+#DEGUB
+
 def doPreprocessing(path_nlin_mask,path_Temp, ID_Test, Label_Files_Test , Label, T1_Files_Test , t1 , T2_Files_Test , t2 , PD_Files_Test , pd , FLAIR_Files_Test , flair ,  path_av_t1 , path_av_t2 , path_av_pd , path_av_flair):
-    import os
     nlmf = 'Y'
     nuf = 'Y'
     volpolf = 'Y'
@@ -86,7 +133,8 @@ def doPreprocessing(path_nlin_mask,path_Temp, ID_Test, Label_Files_Test , Label,
                 os.system(new_command)
                 str_t1_proc = path_Temp + str(ID_Test[i]) + '_T1_N3.mnc'
             if (volpolf == 'Y'):
-                new_command = 'volume_pol ' + path_Temp + str(ID_Test[i]) + '_T1_N3.mnc '  + path_av_t1 + ' --order 1 --noclamp --expfile ' + path_Temp + str(ID_Test[i]) + '_T1_norm --clobber'
+                #new_command = 'volume_pol ' + path_Temp + str(ID_Test[i]) + '_T1_N3.mnc '  + path_av_t1 + ' --order 2 --noclamp --expfile ' + path_Temp + str(ID_Test[i]) + '_T1_norm --clobber --source_mask '+ path_Temp + str(ID_Test[i]) + '_T1_Mask.mnc --target_mask '+path_nlin_mask 
+                new_command = 'volume_pol ' + path_Temp + str(ID_Test[i]) + '_T1_N3.mnc '  + path_av_t1 + ' --order 1 --noclamp --expfile ' + path_Temp + str(ID_Test[i]) + '_T1_norm --clobber' 
                 os.system(new_command)
                 new_command = 'minccalc -expfile ' + path_Temp + str(ID_Test[i]) + '_T1_norm '  + path_Temp + str(ID_Test[i]) + '_T1_N3.mnc ' + path_Temp + str(ID_Test[i]) + '_T1_VP.mnc ' 
                 os.system(new_command)
@@ -209,8 +257,7 @@ def doPreprocessing(path_nlin_mask,path_Temp, ID_Test, Label_Files_Test , Label,
         os.system(new_command) 
         str_Mask = path_Temp + str(ID_Test[i]) + '_Mask_nl.mnc'
         nl_xfm = path_Temp + str(ID_Test[i]) + '_T1toTemplate_pp_both.xfm'
-            
-        print('.'),
+        print('.')
         preprocessed_list[0,0]= 'Subjects,T1s,Masks,XFMs'
         preprocessed_list[i+1,0]= str(ID_Test[i]) + ',' + str_t1_proc + ',' + str_Mask + ',' + nl_xfm
         if (t2 != ''):
@@ -235,23 +282,31 @@ def doPreprocessing(path_nlin_mask,path_Temp, ID_Test, Label_Files_Test , Label,
     return [preprocessed_list_address]
 ###########################################################################################################################################################################
 def Calculate_Tissue_Histogram(Files_Train , Masks_Train , Label_Files_Train , image_range , n_labels):
-    import minc
-    import numpy as np
-    PDF_Label = np.zeros(shape = (image_range , n_labels)).astype(float)
-    print('Calculating Histograms of Tissues: .'),
+    PDF_Label = np.zeros(shape = (image_range , n_labels),dtype=np.float)
+    print(('Calculating Histograms of Tissues: .'), end=' ',flush=True)
     for i in range(0 , len(Files_Train)):
-        print('.'),
+        print(('.'), end='',flush=True)
         str_File = str(Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
         str_Mask = str(Masks_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
         str_Label = str(Label_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-        manual_segmentation = minc.Image(str_Label).data
-        image_vol = minc.Image(str_File).data
-        brain_mask = minc.Image(str_Mask).data
-        image_vol = np.round(image_vol)
+
+        #manual_segmentation = minc.Label(str_Label).data
+        manual_segmentation = sitk.GetArrayFromImage(sitk.ReadImage(str_Label))
+        #image_vol  = minc.Image(str_File).data
+        image_vol = sitk.GetArrayFromImage(sitk.ReadImage(str_File))
+        
+        #brain_mask = minc.Label(str_Mask).data > 0
+        brain_mask = sitk.GetArrayFromImage(sitk.ReadImage(str_Mask))> 0
+        
+        image_vol  = np.round(image_vol).astype(np.int) # FIX ?
+
         for nl in range(0 , n_labels):
+            masked_vol = image_vol[ (manual_segmentation==(nl+1)) * brain_mask]
             for j in range(1 , image_range):
-                PDF_Label[j,nl] = PDF_Label[j,nl] + np.sum((image_vol * (manual_segmentation==(nl+1)) * brain_mask) == j)
-    
+                PDF_Label[j,nl] = PDF_Label[j,nl] + np.sum( masked_vol == j, dtype=np.float)
+
+    # VF: normalize after all files are processed
+    for nl in range(0 , n_labels):
         PDF_Label[:,nl] = PDF_Label[:,nl] / np.sum(PDF_Label[:,nl])
     print(' Done.')
     return PDF_Label
@@ -261,7 +316,7 @@ def load_csv(csv_file):
     data = {}
     with open(csv_file , 'r') as f:
         for r in csv.DictReader(f):
-            for k in r.iterkeys():
+            for k in r.keys():
                 try:
                     data[k].append(r[k])
                 except KeyError:
@@ -269,7 +324,6 @@ def load_csv(csv_file):
     return data
 ###########################################################################################################################################################################
 def get_Train_Test(Indices_G , K , IDs):
-    import numpy as np
     i_train = 0
     i_test = 0
     ID_Train = np.empty(shape = (np.sum(Indices_G != K) , 1) , dtype = list , order = 'C')
@@ -336,52 +390,93 @@ def get_addressess(TestList):
         cls_Files_Test = ''
     return [ID_Test, XFM_Files_Test, xfmf, Mask_Files_Test, maskf, T1_Files_Test, t1, T2_Files_Test, t2, PD_Files_Test, pd, FLAIR_Files_Test, flair, Label_Files_Test, Label,cls_Files_Test, clsf]
 ###########################################################################################################################################################################
-import sys,getopt
+
+def warp_and_read_prior(prior, ref_scan, xfm, tmp_file_location,clobber=False):
+    """ Apply xfm to prior , like ref_scan and store into tmp_file_location
+    then read into numpy array. If tmp_file_location already exists - just read it
+    Parameters:
+        prior - input scan
+        ref_scan - reference space
+        xfm - transformation
+        tmp_file_location - output file
+        clobber - overwrite output (default: False)
+
+    Returns: 
+        numpy array of floats of the contents of output
+    """
+    if not os.path.exists(tmp_file_location) or clobber:
+        #run_command(f'mincresample {prior} -like  {ref_scan} -transform {xfm} -invert_transform {tmp_file_location} -clobber')
+        run_command(f'itk_resample {prior} --like  {ref_scan} --transform {xfm} --invert_transform {tmp_file_location} --clobber')
+    #return minc.Image(tmp_file_location).data
+    return sitk.GetArrayFromImage(sitk.ReadImage(tmp_file_location))
+
+
 def main(argv):   
-    import minc
-    import numpy as np
-    import os
-    #from joblib import Parallel
-    #import multiprocessing
-# Default Values    
+    # Default Values    
     n_folds=10
     image_range = 256
     subject = 0
     Classifier='RF'    
-    InputList=''
-    doPreprocessingf='N'
+    doPreprocessingf = False
     path_trained_classifiers=''
     InputList=''
     TestList=''
-    path_Temp=''
+    path_Temp=None
     path_nlin_files = ''
     ClassificationMode = ''
     path_output = ''
     TestList = ''
-    n_labels = 0
+    n_labels = 3
+    n_jobs = 1
+    temp_dir = None
+    nifti = False
+
+
+    _help="""
+BISON.py -c <Classifier (Default: LDA)> 
+         -i <Input CSV File>  - for training only (TT or CV mode)
+         -m <Templates directory> - location of template files, unless -p option is used 
+         -f <Number of Folds in K-fold Cross Validation (Default=10)>
+         -o <Output Path>
+         -t <Temp Files Path>
+         -e <Classification Mode> (CV/TT/PT)
+         -n <New Data CSV File>  - for segmenting only (TT or PT mode)
+         -p <Pre-trained Classifiers Path> - pretrained classfier and templates directory
+         -d <Do Preprocessing>  - run nonlinear registration
+         -l <The Number of Classes, default 3> 
+         -j <n> maximum number of jobs (CPUs) to use for classification default 1, -1 - all possible
+         --nifti output a nifti file
+
+CSV File Column Headers: Subjects, XFMs, T1s, T2s, PDs, FLAIRs, Labels, cls, Masks
+Preprocessing Options: 
+    Y:   Perform Preprocessing 
+Classification Mode Options:
+    CV:   Cross Validation (On The Same Dataset) 
+    TT:   Train-Test Model (Training on Input CSV Data, Segment New Data, Needs an extra CSV file)
+    PT:   Using Pre-trained Classifiers 
+
+Classifier Options:
+    NB:   Naive Bayes
+    LDA:  Linear Discriminant Analysis
+    QDA:  Quadratic Discriminant Analysis
+    LR:   Logistic Regression
+    KNN:  K Nearest Neighbors 
+    RF:   Random Forest 
+    SVM:  Support Vector Machines 
+    Tree: Decision Tree
+    Bagging
+    AdaBoost
+    """
 
     try:
-        opts, args = getopt.getopt(argv,"hc:i:m:o:t:e:n:f:p:d:l:",["cfile=","ifile=","mfile=","ofile=","tfile=","efile=","nfile=","ffile=","pfile=","dfile=","lfile="])
+        opts, args = getopt.getopt(argv,"hc:i:m:o:t:e:n:f:p:dl:j:",["cfile=","ifile=","mfile=","ofile=","tfile=","efile=","nfile=","ffile=","pfile=","dfile","lfile=","jobs=","nifti"])
     except getopt.GetoptError:
-        print 'BISON.py -c <Classifier (Default: LDA)> -i <Input CSV File> \n -m <Template Mask File> -f <Number of Folds in K-fold Cross Validation (Default=10)>'
-        print' -o <Output Path> -t <Temp Files Path> -e <Classification Mode> -n <New Data CSV File> -p <Pre-trained Classifiers Path> -d  <Do Preprocessing> -l < The Number of Classes> \n'
-        print 'CSV File Column Headers: Subjects, XFMs, T1s, T2s, PDs, FLAIRs, Labels, cls, Masks\n'
-        print 'Preprocessing Options: \n Y:   Perform Preprocessing \n '
-        print 'Classification Mode Options: \n CV:   Cross Validation (On The Same Dataset) \n TT:   Train-Test Model (Training on Input CSV Data, Segment New Data, Needs an extra CSV file)\n'
-        print ' PT:   Using Pre-trained Classifiers \n'                  
-        print 'Classifier Options:\n NB:   Naive Bayes\n LDA:  Linear Discriminant Analysis\n QDA:  Quadratic Discriminant Analysis\n LR:   Logistic Regression'
-        print ' KNN:  K Nearest Neighbors \n RF:   Random Forest \n SVM:  Support Vector Machines \n Tree: Decision Tree\n Bagging\n AdaBoost'
+        print(_help)
         sys.exit(2)
+
     for opt, arg in opts:
         if opt == '-h':
-            print 'Label_Segmentation_Pipeline.py -c <Classifier (Default: LDA)> -i <Input CSV File> \n -m <Template Mask File>  -f <Number of Folds in K-fold Cross Validation (Default=10)>'
-            print' -o <Output Path> -t <Temp Files Path> -e <Classification Mode> -n <New Data CSV File> -p <Pre-trained Classifiers Path> -d  <Do Preprocessing> -l < The Number of Classes> \n'            
-            print 'CSV File Column Headers: Subjects, XFMs, T1s, T2s, PDs, FLAIRs, Labels, cls, Masks\n'            
-            print 'Preprocessing Options: \n Y:   Perform Preprocessing \n'            
-            print 'Classification Mode Options: \n CV:   Cross Validation (On The Same Dataset) \n TT:   Train-Test Model (Training on Input CSV Data, Segment New Data, Needs an extra CSV file)'
-            print ' PT:   Using Pre-trained Classifiers \n'            
-            print 'Classifier Options:\n NB:   Naive Bayes\n LDA:  Linear Discriminant Analysis\n QDA:  Quadratic Discriminant Analysis\n LR:   Logistic Regression'
-            print ' KNN:  K Nearest Neighbors \n RF:   Random Forest \n SVM:  Support Vector Machines \n Tree: Decision Tree\n Bagging\n AdaBoost'
+            print(_help)
             sys.exit()
         elif opt in ("-c", "--cfile"):
             Classifier = arg
@@ -392,7 +487,9 @@ def main(argv):
         elif opt in ("-o", "--ofile"):
             path_output = arg
         elif opt in ("-t", "--tfile"):
-            path_Temp = arg+str(np.random.randint(1000000, size=1)).replace("[",'').replace("]",'').replace(" ",'').replace(" ",'')+'_'
+            if not os.path.exists(arg):
+                os.makedirs(arg)
+            path_Temp = arg + os.sep + 'BISON_'
         elif opt in ("-e", "--efile"):
             ClassificationMode = arg
         elif opt in ("-n", "--nfile"):
@@ -402,31 +499,45 @@ def main(argv):
         elif opt in ("-p", "--pfile"):
             path_trained_classifiers = arg
         elif opt in ("-d", "--dfile"):
-            doPreprocessingf = arg    
+            doPreprocessingf = True
         elif opt in ("-l", "--lfile"):
             n_labels = int(arg)
+        elif opt in ("-j", "--jobs"):
+            n_jobs = int(arg)
+        elif opt in ("--nifti"):
+            nifti = True
+        else:
+            print("Unknown option:",opt)
+            print(_help)
+            sys.exit(1)
 
-    print 'The Selected Input CSV File is ', InputList
-    print 'The Selected Classifier is ', Classifier
-    print 'The Classification Mode is ', ClassificationMode
-    print 'The Selected Template Mask is ', path_nlin_files
-    print 'The Selected Output Path is ', path_output    
-    print 'The Assigned Temp Files Path is ', path_Temp
-    if (doPreprocessingf == 'Y'):
-        print 'Preprocessing:  Yes'
-    
+    if path_Temp is None:
+        temp_dir = tempfile.TemporaryDirectory(prefix="BISON_")
+        path_Temp = temp_dir.name + os.sep + 'temp_'
+
+    print('The Selected Input CSV File is ', InputList)
+    print('The Selected Test CSV File is ', TestList)
+    print('The Selected Classifier is ', Classifier)
+    print('The Classification Mode is ', ClassificationMode)
+    print('The Selected Template Mask is ', path_nlin_files)
+    print('The Selected Output Path is ', path_output)    
+    print('The Assigned Temp Files Path is ', path_Temp)
+
+    if doPreprocessingf:
+        print('Preprocessing:  Yes')
+
     if (Classifier == 'NB'):
         # Naive Bayes
         from sklearn.naive_bayes import GaussianNB
-        clf = GaussianNB()        
-    elif (Classifier == 'LDA'):      
+        clf = GaussianNB()
+    elif (Classifier == 'LDA'):
         # Linear Discriminant Analysis
         from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-        clf = LinearDiscriminantAnalysis(solver = "svd" , store_covariance = True)  
+        clf = LinearDiscriminantAnalysis(solver = "svd" )  
     elif (Classifier == 'QDA'):
         # Quadratic Discriminant Analysis
         from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
-        clf = QuadraticDiscriminantAnalysis(priors = None, reg_param = 0.0 , store_covariances = False , tol = 0.0001)
+        clf = QuadraticDiscriminantAnalysis()
     elif (Classifier == 'LR'):
         # Logistic Regression
         from sklearn.linear_model import LogisticRegression
@@ -439,15 +550,39 @@ def main(argv):
         # Bagging
         from sklearn.ensemble import BaggingClassifier
         from sklearn.neighbors import KNeighborsClassifier
-        clf = BaggingClassifier(KNeighborsClassifier() , max_samples = 0.5 , max_features = 0.5)        
+        clf = BaggingClassifier(KNeighborsClassifier() , max_samples = 0.5 , max_features = 0.5)
     elif (Classifier == 'AdaBoost'):
         # AdaBoost
         from sklearn.ensemble import AdaBoostClassifier
-        clf = AdaBoostClassifier(n_estimators = 100)        
+        clf = AdaBoostClassifier(n_estimators = 100)
     elif (Classifier == 'RF'):
         # Random Forest
         from sklearn.ensemble import RandomForestClassifier
-        clf = RandomForestClassifier(n_estimators = 100)
+        clf = RandomForestClassifier(n_estimators = 100, n_jobs=n_jobs)
+    elif (Classifier == 'RF0'):
+        # Random Forest
+        from sklearn.ensemble import RandomForestClassifier
+        clf = RandomForestClassifier(n_estimators = 128, n_jobs=n_jobs, max_depth=10,verbose=True)
+    elif (Classifier == 'RF1'):
+        # Random Forest
+        from sklearn.ensemble import RandomForestClassifier
+        clf = RandomForestClassifier(n_estimators = 128, n_jobs=n_jobs, max_depth=20,verbose=True)
+    elif (Classifier == 'RF2'):
+        # Random Forest
+        from sklearn.ensemble import RandomForestClassifier
+        clf = RandomForestClassifier(n_estimators = 128, n_jobs=n_jobs, max_depth=40,verbose=True)
+    elif (Classifier == 'RF3'):
+        # Random Forest
+        from sklearn.ensemble import RandomForestClassifier
+        clf = RandomForestClassifier(n_estimators = 128, n_jobs=n_jobs, max_depth=100,verbose=True)
+    elif (Classifier == 'RF4'):
+        # Random Forest
+        from sklearn.ensemble import RandomForestClassifier
+        clf = RandomForestClassifier(n_estimators = 128, n_jobs=n_jobs, max_depth=1000,verbose=True)
+    elif (Classifier == 'RF5'):
+        # Random Forest
+        from sklearn.ensemble import RandomForestClassifier
+        clf = RandomForestClassifier(n_estimators = 128, n_jobs=n_jobs, max_depth=100, min_samples_split=100, min_samples_leaf=100, verbose=True)
     elif (Classifier == 'SVM'):
         # Support Vector Machines
         from sklearn import svm
@@ -455,48 +590,51 @@ def main(argv):
     elif (Classifier == 'Tree'):
         # Decision Tree
         from sklearn import tree
-        clf = tree.DecisionTreeClassifier()   
+        clf = tree.DecisionTreeClassifier()
     else:
-        print 'The Selected Classifier Was Not Recongnized'
+        print('The Selected Classifier Was Not Recognized')
         sys.exit()
+
     if (InputList != ''):
     	[IDs, XFM_Files, xfmf, Mask_Files, maskf, T1_Files, t1, T2_Files, t2, PD_Files, pd, FLAIR_Files, flair, Label_Files, Label,cls_Files, clsf] = get_addressess(InputList)
+
 ####################### Preprocessing ####################################################################################################################################
     if (path_nlin_files == ''):
-	print 'No path has been defined for the template files'
-	sys.exit()
+	    print('No path has been defined for the template files')
+	    sys.exit()
     if (path_nlin_files != ''):
-    	path_nlin_mask = path_nlin_files+'Mask.mnc'
-    	path_av_t1 = path_nlin_files + 'Av_T1.mnc'
-    	path_av_t2 = path_nlin_files + 'Av_T2.mnc'
-    	path_av_pd = path_nlin_files + 'Av_PD.mnc'
-    	path_av_flair = path_nlin_files + 'Av_FLAIR.mnc'
+    	path_nlin_mask = path_nlin_files + os.sep + 'Mask.mnc'
+    	path_av_t1 = path_nlin_files +  os.sep + 'Av_T1.mnc'
+    	path_av_t2 = path_nlin_files +  os.sep + 'Av_T2.mnc'
+    	path_av_pd = path_nlin_files +  os.sep + 'Av_PD.mnc'
+    	path_av_flair = path_nlin_files +  os.sep + 'Av_FLAIR.mnc'
 
     if ((path_trained_classifiers == '') & (ClassificationMode == 'PT')):
-	print 'No path has been defined for the pretrained classifiers'
-	sys.exit()
+	    print('No path has been defined for the pretrained classifiers')
+	    sys.exit()
     if (path_trained_classifiers != ''):    
-        path_av_t1 = path_trained_classifiers + 'Av_T1.mnc'
-        path_av_t2 = path_trained_classifiers + 'Av_T2.mnc'
-        path_av_pd = path_trained_classifiers + 'Av_PD.mnc'
-        path_av_flair = path_trained_classifiers + 'Av_FLAIR.mnc'   
+        path_av_t1 = path_trained_classifiers + os.sep + 'Av_T1.mnc'
+        path_av_t2 = path_trained_classifiers + os.sep + 'Av_T2.mnc'
+        path_av_pd = path_trained_classifiers + os.sep + 'Av_PD.mnc'
+        path_av_flair = path_trained_classifiers + os.sep + 'Av_FLAIR.mnc'   
 
     if (n_labels == 0):
-	print 'The number of classes has not been determined'
-	sys.exit()
+        print('The number of classes has not been determined')
+        sys.exit()
 
     if (ClassificationMode == ''):
-	print 'The classification mode has not been determined'
-	sys.exit()
+        print('The classification mode has not been determined')
+        sys.exit()
 ###########################################################################################################################################################################
     if ClassificationMode == 'CV':
-        if (doPreprocessingf == 'Y'):
-            preprocessed_list_address=doPreprocessing(path_nlin_mask,path_Temp, IDs, Label_Files , Label, T1_Files , t1 , T2_Files , t2 , PD_Files , pd , FLAIR_Files, flair ,  path_av_t1 , path_av_t2 , path_av_pd , path_av_flair)
-            [IDs, XFM_Files, xfmf, Mask_Files, maskf, T1_Files, t1, T2_Files, t2, PD_Files, pd, FLAIR_Files, flair, Label_Files, Label,cls_Files, clsf] = get_addressess(path_Temp+'Preprocessed.csv')
+        if doPreprocessingf:
+            preprocessed_list_address = doPreprocessing(path_nlin_mask,path_Temp, IDs, Label_Files , Label, T1_Files , t1 , T2_Files , t2 , PD_Files , pd , FLAIR_Files, flair ,  path_av_t1 , path_av_t2 , path_av_pd , path_av_flair)
+            [IDs, XFM_Files, xfmf, Mask_Files, maskf, T1_Files, t1, T2_Files, t2, PD_Files, pd, FLAIR_Files, flair, Label_Files, Label,cls_Files, clsf] = get_addressess( path_Temp + 'Preprocessed.csv')
 
         if Label == '':    
-            print 'No Labels to Train on'
+            print('No Labels to Train on')
             sys.exit()
+
         Indices_G = np.random.permutation(len(IDs)) * n_folds / len(IDs)
         Kappa = np.zeros(shape = (len(IDs) , n_labels))
         ID_Subject = np.empty(shape = (len(IDs),1) , dtype = list, order = 'C')       
@@ -528,115 +666,111 @@ def main(argv):
                 FLAIR_PDF_Label = Calculate_Tissue_Histogram(FLAIR_Files_Train , Mask_Files_Train , Label_Files_Train , image_range , n_labels)
                 n_features = n_features + n_labels + 2
             
-            path_sp = path_nlin_files + 'SP_'
+            path_sp = path_nlin_files + os.sep + 'SP_'
             
             X_All = np.empty(shape = (0 , n_features) , dtype = float , order = 'C')
-            Y_All = np.empty(shape = (0 , ) , dtype = float , order = 'C')
+            Y_All = np.empty(shape = (0 , ) , dtype = np.int32 , order = 'C')
             
             for i in range(0 , len(ID_Train)):
                 str_Train = str(ID_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                print('Extracting The Features: Subject: ID = ' + str_Train)
+                print(('Extracting The Features: Subject: ID = ' + str_Train))
                 
                 str_Mask = str(Mask_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                Mask = minc.Image(str_Mask).data
-                ind_WM = (Mask > 0)
+                #Mask = minc.Label(str_Mask).data
+                Mask = sitk.GetArrayFromImage(sitk.ReadImage(str_Mask))
+                ind_Mask = (Mask > 0)
                 N=int(np.sum(Mask))
                 Label = str(Label_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'') 
-                WMT = minc.Image(Label).data
-                
+                #WMT = minc.Label(Label).data
+                WMT = sitk.GetArrayFromImage(sitk.ReadImage(Label))
+
                 nl_xfm = str(XFM_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
                 spatial_priors = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    new_command = 'mincresample ' + path_sp + str(nl+1) + '.mnc -like  ' + Label + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_sp.mnc -clobber'
-                    os.system(new_command)
-                    spatial_prior = minc.Image(path_Temp + str(K) + '_tmp_sp.mnc').data
-                    spatial_priors[0:N,nl] = spatial_prior[ind_WM]
-                
+                    spatial_prior = warp_and_read_prior(path_sp + str(nl+1) + '.mnc',Label,nl_xfm, path_Temp + 'train_' + str(i) + '_' + str(K) + '_tmp_sp_'+str(nl+1)+'.mnc')
+                    spatial_priors[0:N,nl] = spatial_prior[ind_Mask]
+
                 if (t1 != ''):
                     str_T1 = str(T1_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                    T1 = minc.Image(str_T1).data
-                    new_command = 'mincresample ' + path_av_t1 + ' -like ' + Label + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_t1.mnc -clobber'
-                    os.system(new_command)
-                    av_T1 = minc.Image(path_Temp + str(K) + '_tmp_t1.mnc').data
+                    #T1 = minc.Image(str_T1).data
+                    T1 = sitk.GetArrayFromImage(sitk.ReadImage(str_T1))
+                    av_T1 = warp_and_read_prior(path_av_t1, Label, nl_xfm, path_Temp + 'train_' + str(i)+'_' + str(K) + '_tmp_t1.mnc')
                     T1[T1 < 1] = 1
                     T1[T1 > (image_range - 1)] = (image_range - 1)
                     T1_Label_probability = np.empty(shape = (N, n_labels) , dtype = float , order = 'C')
                     for nl in range(0 , n_labels):
-                        T1_Label_probability[:,nl] = T1_PDF_Label[np.round(T1[ind_WM]).astype(int),nl]
+                        T1_Label_probability[:,nl] = T1_PDF_Label[np.round(T1[ind_Mask]).astype(np.int),nl]
                     X_t1 = np.zeros(shape = (N , 2))
-                    X_t1[0 : N , 0] = T1[ind_WM]
-                    X_t1[0 : N , 1] = av_T1[ind_WM]
+                    X_t1[0 : N , 0] = T1[ind_Mask]
+                    X_t1[0 : N , 1] = av_T1[ind_Mask]
                     X_t1 = np.concatenate((X_t1 , T1_Label_probability) , axis = 1)
-    
-                if (t2 != ''):                
+
+                if (t2 != ''):
                     str_T2 = str(T2_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                    T2 = minc.Image(str_T2).data
-                    new_command = 'mincresample ' + path_av_t2 + ' -like ' + Label + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_t2.mnc -clobber'
-                    os.system(new_command)
-                    av_T2 = minc.Image(path_Temp + str(K) + '_tmp_t2.mnc').data
+                    #T2 = minc.Image(str_T2).data
+                    T2 = sitk.GetArrayFromImage(sitk.ReadImage(str_T2))
+                    av_T2 = warp_and_read_prior(path_av_t2,Label,nl_xfm,path_Temp + 'train_' + str(i)+'_'+str(K) + '_tmp_t2.mnc')
                     T2[T2 < 1] = 1
                     T2[T2 > (image_range - 1)] = (image_range - 1)
                     T2_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                     for nl in range(0 , n_labels):
-                        T2_Label_probability[:,nl] = T2_PDF_Label[np.round(T2[ind_WM]).astype(int),nl]
+                        T2_Label_probability[:,nl] = T2_PDF_Label[np.round(T2[ind_Mask]).astype(np.int),nl]
                     if (t1 == ''):
                         X_t2 = np.zeros(shape = (N , 2))
-                        X_t2[0 : N , 0] = T2[ind_WM]
-                        X_t2[0 : N , 1] = av_T2[ind_WM]
+                        X_t2[0 : N , 0] = T2[ind_Mask]
+                        X_t2[0 : N , 1] = av_T2[ind_Mask]
                     if (t1 != ''):
                         X_t2 = np.zeros(shape = (N , 3))
-                        X_t2[0 : N , 0] = T2[ind_WM]
-                        X_t2[0 : N , 1] = av_T2[ind_WM]    
-                        X_t2[0 : N , 2] = T2[ind_WM] / T1[ind_WM]   
+                        X_t2[0 : N , 0] = T2[ind_Mask]
+                        X_t2[0 : N , 1] = av_T2[ind_Mask]
+                        X_t2[0 : N , 2] = T2[ind_Mask] / T1[ind_Mask]
                     X_t2 = np.concatenate((X_t2 , T2_Label_probability) , axis = 1)
-                    
+
                 if (pd != ''):
                     str_PD = str(PD_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                    PD = minc.Image(str_PD).data
-                    new_command = 'mincresample ' + path_av_pd + ' -like ' + Label + ' -transform ' + nl_xfm + ' -invert_transform '+ path_Temp + str(K) + '_tmp_pd.mnc -clobber'
-                    os.system(new_command)
-                    av_PD = minc.Image(path_Temp + str(K) + '_tmp_pd.mnc').data
+                    #PD = minc.Image(str_PD).data
+                    PD = sitk.GetArrayFromImage(sitk.ReadImage(str_PD))
+                    av_PD = warp_and_read_prior(path_av_pd,Label,nl_xfm,path_Temp + 'train_' + str(i)+'_'+str(K) + '_tmp_pd.mnc')
                     PD[PD < 1] = 1
                     PD[PD > (image_range - 1)] = (image_range - 1)
                     PD_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                     for nl in range(0 , n_labels):
-                        PD_Label_probability[:,nl] = PD_PDF_Label[np.round(PD[ind_WM]).astype(int),nl]
+                        PD_Label_probability[:,nl] = PD_PDF_Label[np.round(PD[ind_Mask]).astype(np.int),nl]
                     if (t1 == ''):
                         X_pd = np.zeros(shape = (N , 2))
-                        X_pd[0 : N , 0] = PD[ind_WM]
-                        X_pd[0 : N , 1] = av_PD[ind_WM]
+                        X_pd[0 : N , 0] = PD[ind_Mask]
+                        X_pd[0 : N , 1] = av_PD[ind_Mask]
                     if (t1 != ''):
                         X_pd = np.zeros(shape = (N , 3))
-                        X_pd[0 : N , 0] = PD[ind_WM]
-                        X_pd[0 : N , 1] = av_PD[ind_WM]                        
-                        X_pd[0 : N , 2] = PD[ind_WM] / T1[ind_WM]      
-                    X_pd = np.concatenate((X_pd , PD_Label_probability ) , axis = 1)                
-                    
+                        X_pd[0 : N , 0] = PD[ind_Mask]
+                        X_pd[0 : N , 1] = av_PD[ind_Mask]
+                        X_pd[0 : N , 2] = PD[ind_Mask] / T1[ind_Mask]
+                    X_pd = np.concatenate((X_pd , PD_Label_probability ) , axis = 1)
+
                 if (flair != ''):
                     str_FLAIR = str(FLAIR_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                    FLAIR = minc.Image(str_FLAIR).data
-                    new_command = 'mincresample ' + path_av_flair + ' -like ' + Label + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_flair.mnc -clobber'
-                    os.system(new_command)
-                    av_FLAIR = minc.Image(path_Temp + str(K) + '_tmp_flair.mnc').data
+                    #FLAIR = minc.Image(str_FLAIR).data
+                    FLAIR = sitk.GetArrayFromImage(sitk.ReadImage(str_FLAIR))
+                    av_FLAIR = warp_and_read_prior(path_av_flair,Label,nl_xfm, path_Temp + 'train_' + str(i) + '_'+str(K) + '_tmp_flair.mnc')
                     FLAIR[FLAIR < 1] = 1
                     FLAIR[FLAIR > (image_range - 1)] = (image_range - 1)
                     FLAIR_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                     for nl in range(0 , n_labels):
-                        FLAIR_Label_probability[:,nl] = FLAIR_PDF_Label[np.round(FLAIR[ind_WM]).astype(int),nl]
+                        FLAIR_Label_probability[:,nl] = FLAIR_PDF_Label[np.round(FLAIR[ind_Mask]).astype(np.int),nl]
                     if (t1 == ''):
                         X_flair = np.zeros(shape = (N , 3))
-                        X_flair[0 : N , 0] = FLAIR[ind_WM]
-                        X_flair[0 : N , 1] = av_FLAIR[ind_WM]
+                        X_flair[0 : N , 0] = FLAIR[ind_Mask]
+                        X_flair[0 : N , 1] = av_FLAIR[ind_Mask]
                     if (t1 != ''):
                         X_flair = np.zeros(shape = (N , 4))
-                        X_flair[0 : N , 0] = FLAIR[ind_WM]
-                        X_flair[0 : N , 1] = av_FLAIR[ind_WM]
-                        X_flair[0 : N , 2] = FLAIR[ind_WM] / T1[ind_WM]       
+                        X_flair[0 : N , 0] = FLAIR[ind_Mask]
+                        X_flair[0 : N , 1] = av_FLAIR[ind_Mask]
+                        X_flair[0 : N , 2] = FLAIR[ind_Mask] / T1[ind_Mask]
                     X_flair = np.concatenate((X_flair , FLAIR_Label_probability ) , axis = 1)
-                
+
                 else:
                     X = np.zeros(shape = (N , 0))
-                    X = np.concatenate((X , spatial_priors) , axis = 1)  
+                    X = np.concatenate((X , spatial_priors) , axis = 1)
                 if (t1 != ''):
                     X = np.concatenate((X , X_t1) , axis = 1)
                 if (t2 != ''):
@@ -645,116 +779,112 @@ def main(argv):
                     X = np.concatenate((X , X_pd) , axis = 1)
                 if (flair != ''):
                     X = np.concatenate((X , X_flair) , axis = 1)
-                
+
                 X_All = np.concatenate((X_All , X) , axis = 0)
-                Y = np.zeros(shape = (N , ))
-                Y[0 : N , ] = (WMT[ind_WM])    
+                Y = np.zeros(shape = (N , ),dtype=np.int32)
+                Y[0 : N , ] = (WMT[ind_Mask])
                 Y_All = np.concatenate((Y_All , Y) , axis = 0)
-            
+
             # Training the Classifier
             clf = clf.fit(X_All , Y_All)
-    
+
             for i in range(0 , len(ID_Test)):
                 str_Test = str(ID_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                print('Segmenting Volumes: Subject: ID = ' + str_Test)
+                print(('Segmenting Volumes: Subject: ID = ' + str_Test))
                 Label = str(Label_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                WMT = minc.Image(Label).data                  
+                #WMT = minc.Image(Label).data   
+                WMT = sitk.GetArrayFromImage(sitk.ReadImage(Label))
                 str_Mask = str(Mask_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                Mask = minc.Image(str_Mask).data
-                ind_WM = (Mask > 0)
+                #Mask = minc.Image(str_Mask).data
+                Mask = sitk.GetArrayFromImage(sitk.ReadImage(str_Mask))
+                ind_Mask = (Mask > 0)
                 N=int(np.sum(Mask))
                 nl_xfm = str(XFM_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
                 spatial_priors = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    new_command = 'mincresample ' + path_sp + str(nl+1) + '.mnc -like  ' + Label + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_sp.mnc -clobber'
-                    os.system(new_command)
-                    spatial_prior = minc.Image(path_Temp + str(K) + '_tmp_sp.mnc').data
-                    spatial_priors[0:N,nl] = spatial_prior[ind_WM]                
+                    spatial_prior = warp_and_read_prior(path_sp + str(nl+1) + '.mnc', Label,nl_xfm, path_Temp + 'test_' + str(i) + '_' + str(K) + '_tmp_sp_'+str(nl+1)+'.mnc')
+                    spatial_priors[0:N,nl] = spatial_prior[ind_Mask]                
                                
                 if (t1 != ''):
                     str_T1 = str(T1_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                    T1 = minc.Image(str_T1).data
-                    new_command = 'mincresample ' + path_av_t1 + ' -like ' + Label + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_t1.mnc -clobber'
-                    os.system(new_command)
-                    av_T1 = minc.Image(path_Temp + str(K) + '_tmp_t1.mnc').data
+                    #T1 = minc.Image(str_T1).data
+                    T1 = sitk.GetArrayFromImage(sitk.ReadImage(str_T1))
+                    av_T1 = warp_and_read_prior(path_av_t1, Label, str_T1, path_Temp + 'test_' +  str(i) + '_' + str(K) + '_tmp_t1.mnc')
                     T1[T1 < 1] = 1
                     T1[T1 > (image_range - 1)] = (image_range - 1)
                     T1_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                     for nl in range(0 , n_labels):
-                        T1_Label_probability[:,nl] = T1_PDF_Label[np.round(T1[ind_WM]).astype(int),nl]
+                        T1_Label_probability[:,nl] = T1_PDF_Label[np.round(T1[ind_Mask]).astype(np.int),nl]
                     N = len(T1_Label_probability)
                     X_t1 = np.zeros(shape = (N , 2))
-                    X_t1[0 : N , 0] = T1[ind_WM]
-                    X_t1[0 : N , 1] = av_T1[ind_WM]
+                    X_t1[0 : N , 0] = T1[ind_Mask]
+                    X_t1[0 : N , 1] = av_T1[ind_Mask]
                     X_t1 = np.concatenate((X_t1 , T1_Label_probability) , axis = 1)
     
                 if (t2 != ''):                
                     str_T2 = str(T2_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                    T2 = minc.Image(str_T2).data
-                    new_command = 'mincresample ' + path_av_t2 + ' -like ' + Label + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_t2.mnc -clobber'
-                    os.system(new_command)
-                    av_T2 = minc.Image(path_Temp + str(K) + '_tmp_t2.mnc').data
+                    #T2 = minc.Image(str_T2).data
+                    T2 = sitk.GetArrayFromImage(sitk.ReadImage(str_T2))
+                    av_T2 = warp_and_read_prior(path_av_t2, Label, nl_xfm, path_Temp + 'test_' +  str(i) + '_' + str(K) + '_tmp_t2.mnc')
                     T2[T2 < 1] = 1
                     T2[T2 > (image_range - 1)] = (image_range - 1)
                     T2_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                     for nl in range(0 , n_labels):
-                        T2_Label_probability[:,nl] = T2_PDF_Label[np.round(T2[ind_WM]).astype(int),nl]
+                        T2_Label_probability[:,nl] = T2_PDF_Label[np.round(T2[ind_Mask]).astype(np.int),nl]
                     N = len(T2_Label_probability)
                     if (t1 == ''):
                         X_t2 = np.zeros(shape = (N , 2))
-                        X_t2[0 : N , 0] = T2[ind_WM]
-                        X_t2[0 : N , 1] = av_T2[ind_WM]
+                        X_t2[0 : N , 0] = T2[ind_Mask]
+                        X_t2[0 : N , 1] = av_T2[ind_Mask]
                     if (t1 != ''):
                         X_t2 = np.zeros(shape = (N , 3))
-                        X_t2[0 : N , 0] = T2[ind_WM]
-                        X_t2[0 : N , 1] = av_T2[ind_WM]    
-                        X_t2[0 : N , 2] = T2[ind_WM] / T1[ind_WM]  
+                        X_t2[0 : N , 0] = T2[ind_Mask]
+                        X_t2[0 : N , 1] = av_T2[ind_Mask]    
+                        X_t2[0 : N , 2] = T2[ind_Mask] / T1[ind_Mask]  
                     X_t2 = np.concatenate((X_t2 , T2_Label_probability) , axis = 1)
                     
                 if (pd != ''):
                     str_PD = str(PD_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                    PD = minc.Image(str_PD).data
-                    new_command = 'mincresample ' + path_av_pd + ' -like ' + Label + ' -transform ' + nl_xfm + ' -invert_transform '+ path_Temp + str(K) + '_tmp_pd.mnc -clobber'
-                    os.system(new_command)
-                    av_PD = minc.Image(path_Temp + str(K) + '_tmp_pd.mnc').data
+                    #PD = minc.Image(str_PD).data
+                    PD = sitk.GetArrayFromImage(sitk.ReadImage(str_PD))
+                    av_PD = warp_and_read_prior(path_av_pd, Label, nl_xfm, path_Temp + 'test_' +  str(i) + '_' + str(K) + '_tmp_pd.mnc')
                     PD[PD < 1] = 1
                     PD[PD > (image_range - 1)] = (image_range - 1)
                     PD_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                     for nl in range(0 , n_labels):
-                        PD_Label_probability[:,nl] = PD_PDF_Label[np.round(PD[ind_WM]).astype(int),nl]
+                        PD_Label_probability[:,nl] = PD_PDF_Label[np.round(PD[ind_Mask]).astype(np.int),nl]
                     N = len(PD_Label_probability)
                     if (t1 == ''):
                         X_pd = np.zeros(shape = (N , 2))
-                        X_pd[0 : N , 0] = PD[ind_WM]
-                        X_pd[0 : N , 1] = av_PD[ind_WM]
+                        X_pd[0 : N , 0] = PD[ind_Mask]
+                        X_pd[0 : N , 1] = av_PD[ind_Mask]
                     if (t1 != ''):
                         X_pd = np.zeros(shape = (N , 3))
-                        X_pd[0 : N , 0] = PD[ind_WM]
-                        X_pd[0 : N , 1] = av_PD[ind_WM]                        
-                        X_pd[0 : N , 2] = PD[ind_WM] / T1[ind_WM]
+                        X_pd[0 : N , 0] = PD[ind_Mask]
+                        X_pd[0 : N , 1] = av_PD[ind_Mask]                        
+                        X_pd[0 : N , 2] = PD[ind_Mask] / T1[ind_Mask]
                     X_pd = np.concatenate((X_pd , PD_Label_probability ) , axis = 1)                
                     
                 if (flair != ''):
                     str_FLAIR = str(FLAIR_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                    FLAIR = minc.Image(str_FLAIR).data
-                    new_command = 'mincresample ' + path_av_flair + ' -like ' + Label + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_flair.mnc -clobber'
-                    os.system(new_command)
-                    av_FLAIR = minc.Image(path_Temp + str(K) + '_tmp_flair.mnc').data
+                    #FLAIR = minc.Image(str_FLAIR).data
+                    FLAIR = sitk.GetArrayFromImage(sitk.ReadImage(str_FLAIR))
+                    av_FLAIR = warp_and_read_prior(path_av_flair, Label, nl_xfm, path_Temp + 'test_' +  str(i) + '_' + str(K) + '_tmp_flair.mnc')
                     FLAIR[FLAIR < 1] = 1
                     FLAIR[FLAIR > (image_range - 1)] = (image_range - 1)
                     FLAIR_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                     for nl in range(0 , n_labels):
-                        FLAIR_Label_probability[:,nl] = FLAIR_PDF_Label[np.round(FLAIR[ind_WM]).astype(int),nl]
+                        FLAIR_Label_probability[:,nl] = FLAIR_PDF_Label[np.round(FLAIR[ind_Mask]).astype(np.int),nl]
                     N = len(FLAIR_Label_probability)
                     if (t1 == ''):
                         X_flair = np.zeros(shape = (N , 3))
-                        X_flair[0 : N , 0] = FLAIR[ind_WM]
-                        X_flair[0 : N , 1] = av_FLAIR[ind_WM]
+                        X_flair[0 : N , 0] = FLAIR[ind_Mask]
+                        X_flair[0 : N , 1] = av_FLAIR[ind_Mask]
                     if (t1 != ''):
                         X_flair = np.zeros(shape = (N , 4))
-                        X_flair[0 : N , 0] = FLAIR[ind_WM]
-                        X_flair[0 : N , 1] = av_FLAIR[ind_WM]
-                        X_flair[0 : N , 2] = FLAIR[ind_WM] / T1[ind_WM]
+                        X_flair[0 : N , 0] = FLAIR[ind_Mask]
+                        X_flair[0 : N , 1] = av_FLAIR[ind_Mask]
+                        X_flair[0 : N , 2] = FLAIR[ind_Mask] / T1[ind_Mask]
                     X_flair = np.concatenate((X_flair , FLAIR_Label_probability ) , axis = 1)
                 
                 else:
@@ -770,28 +900,34 @@ def main(argv):
                     X = np.concatenate((X , X_flair) , axis = 1)
                         
                 Y = np.zeros(shape = (N , ))
-                Y[0 : N] = WMT[ind_WM]
+                Y[0 : N] = WMT[ind_Mask]
                 Binary_Output = clf.predict(X)
                 for nl in range(0 , n_labels):
                     Kappa[subject,nl] = 2 * np.sum((Y==(nl+1)) * (Binary_Output==(nl+1))) / (np.sum(Y==(nl+1)) + np.sum(Binary_Output==(nl+1)))
                     ID_Subject[subject] = ID_Test[i]
                 if (np.sum(Y) + np.sum(Binary_Output)) == 0:
                     Kappa[subject] = 1
-                print Kappa[subject]
+                print(Kappa[subject])
                 subject = subject + 1
                         
-                WMT_auto = np.zeros(shape = (len(Mask) , len(Mask[0,:]) , len(Mask[0 , 0 , :])))
-                WMT_auto[ind_WM] = Binary_Output[0 : N]
-                out = minc.Image(data = WMT_auto)
-                out.save(name = path_output + Classifier + '_' + str_Test + '_Label.mnc', imitate = str_Mask)
+                WMT_auto = np.zeros(shape = (len(Mask) , len(Mask[0,:]) , len(Mask[0 , 0 , :])),dtype=np.int32)
+                WMT_auto[ind_Mask] = Binary_Output[0 : N]
+                #out = minc.Label(data = WMT_auto)
+                #out.save(name = path_output + os.sep +  Classifier + '_' + str_Test + '_Label.mnc', imitate = str_Mask)
+                
+                inputImage = sitk.ReadImage(str_Mask)
+                result_image = sitk.GetImageFromArray(WMT_auto)
+                result_image.CopyInformation(inputImage)
+                sitk.WriteImage(result_image,  path_output + os.sep +  Classifier + '_' + str_Test + '_Label.mnc')
+                
         
-        print 'Cross Validation Successfully Completed. \nKappa Values:\n'        
-        print Kappa
-        print 'Indices'
-        print Indices_G 
-        print('Mean Kappa: ' + str(np.mean(Kappa)) + ' - STD Kappa: ' + str(np.std(Kappa)))  
+        print('Cross Validation Successfully Completed. \nKappa Values:\n')        
+        print(Kappa)
+        print('Indices')
+        print(Indices_G) 
+        print(('Mean Kappa: ' + str(np.mean(Kappa)) + ' - STD Kappa: ' + str(np.std(Kappa))))  
 ###########################################################################################################################################################################    
-    if ClassificationMode == 'TT':          
+    elif ClassificationMode == 'TT':
         K=0
         Indices_G=np.ones(shape = (len(IDs) , 1))
         ID_Train = IDs
@@ -806,145 +942,155 @@ def main(argv):
             PD_Files_Train = PD_Files
         if (flair != ''):
             FLAIR_Files_Train = FLAIR_Files
-        if (doPreprocessingf == 'Y'):
+        if doPreprocessingf:
             preprocessed_list_address=doPreprocessing(path_nlin_mask,path_Temp, IDs, Label_Files , Label, T1_Files , t1 , T2_Files , t2 , PD_Files , pd , FLAIR_Files, flair ,  path_av_t1 , path_av_t2 , path_av_pd , path_av_flair)
             [IDs, XFM_Files, xfmf, Mask_Files, maskf, T1_Files, t1, T2_Files, t2, PD_Files, pd, FLAIR_Files, flair, Label_Files, Label,cls_Files, clsf] = get_addressess(path_Temp+'Preprocessed.csv')
 
-        [ID_Test, XFM_Files_Test, xfmf, Mask_Files_Test, maskf, T1_Files_Test, t1, T2_Files_Test, t2, PD_Files_Test, pd, FLAIR_Files_Test, flair, Label_Files_Test, Label,cls_Files_Test, clsf] = get_addressess(TestList)
+        [ID_Test, XFM_Files_Test, xfmf, Mask_Files_Test, maskf, T1_Files_Test, t1, T2_Files_Test, t2, PD_Files_Test, pd, FLAIR_Files_Test, flair, Label_Files_Test, Label, cls_Files_Test, clsf] = get_addressess(TestList)
 
         n_features=n_labels           
         if (t1 != ''):        
-            [T1_Files_Train , tmp] = get_Train_Test(Indices_G , K , T1_Files)    
-            T1_PDF_Label = Calculate_Tissue_Histogram(T1_Files_Train , Mask_Files_Train , Label_Files_Train , image_range , n_labels)
+            [T1_Files_Train , tmp] = get_Train_Test(Indices_G , K , T1_Files)
+            if os.path.exists(path_output+os.sep + 'T1_Label.pkl'):
+                T1_PDF_Label = joblib.load(path_output+os.sep +'T1_Label.pkl')
+            else:
+                T1_PDF_Label = Calculate_Tissue_Histogram(T1_Files_Train , Mask_Files_Train , Label_Files_Train , image_range , n_labels)
+                draw_histograms(T1_PDF_Label,path_output+os.sep +'T1_Label.png',"T1w")
             n_features = n_features + n_labels + 2
                 
         if (t2 != ''):
-            [T2_Files_Train , tmp] = get_Train_Test(Indices_G , K , T2_Files)    
-            T2_PDF_Label = Calculate_Tissue_Histogram(T2_Files_Train , Mask_Files_Train , Label_Files_Train , image_range , n_labels)
+            [T2_Files_Train , tmp] = get_Train_Test(Indices_G , K , T2_Files)
+            if os.path.exists(path_output+os.sep +'T2_Label.pkl'):
+                T2_PDF_Label=joblib.load(path_output+os.sep +'T2_Label.pkl')
+            else:    
+                T2_PDF_Label = Calculate_Tissue_Histogram(T2_Files_Train , Mask_Files_Train , Label_Files_Train , image_range , n_labels)
+                draw_histograms(T2_PDF_Label,path_output+os.sep +'T2_Label.png',"T2w")
             n_features = n_features + n_labels + 2
                 
         if (pd != ''):
-            [PD_Files_Train , tmp] = get_Train_Test(Indices_G , K , PD_Files)    
-            PD_PDF_Label = Calculate_Tissue_Histogram(PD_Files_Train , Mask_Files_Train , Label_Files_Train , image_range , n_labels)
+            [PD_Files_Train , tmp] = get_Train_Test(Indices_G , K , PD_Files) 
+            if os.path.exists(path_output+os.sep +'PD_Label.pkl'):
+                PD_PDF_Label=joblib.load(path_output+os.sep +'PD_Label.pkl')
+            else:
+                PD_PDF_Label = Calculate_Tissue_Histogram(PD_Files_Train , Mask_Files_Train , Label_Files_Train , image_range , n_labels)
+                draw_histograms(PD_PDF_Label,path_output+os.sep +'PD_Label.png',"T1w")
             n_features = n_features + n_labels + 2
                 
         if (flair != ''):
-            [FLAIR_Files_Train , tmp] = get_Train_Test(Indices_G , K , FLAIR_Files)    
-            FLAIR_PDF_Label = Calculate_Tissue_Histogram(FLAIR_Files_Train , Mask_Files_Train , Label_Files_Train , image_range , n_labels)
+            [FLAIR_Files_Train , tmp] = get_Train_Test(Indices_G , K , FLAIR_Files)
+            if os.path.exists(path_output+os.sep +'FLAIR_Label.pkl'):
+                PD_PDF_Label=joblib.load(path_output+os.sep +'FLAIR_Label.pkl')
+            else:
+                FLAIR_PDF_Label = Calculate_Tissue_Histogram(FLAIR_Files_Train , Mask_Files_Train , Label_Files_Train , image_range , n_labels)
+                draw_histograms(FLAIR_PDF_Label,path_output+os.sep +'FLAIR_Label.png',"FLAIR")
             n_features = n_features + n_labels + 2            
                        
         path_sp = path_nlin_files + 'SP_'
             
         X_All = np.empty(shape = (0 , n_features ) , dtype = float , order = 'C')
-        Y_All = np.empty(shape = (0 , ) , dtype = float , order = 'C')
+        Y_All = np.empty(shape = (0 , ) , dtype = np.int32 , order = 'C')
     
         for i in range(0 , len(ID_Train)):
             str_Train = str(ID_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-            print('Extracting The Features: Subject: ID = ' + str_Train)
+            print(('Extracting The Features: Subject: ID = ' + str_Train))
                 
             str_Mask = str(Mask_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-            Mask = minc.Image(str_Mask).data
-            ind_WM = (Mask > 0)
+            #Mask = minc.Label(str_Mask).data
+            Mask = sitk.GetArrayFromImage(sitk.ReadImage(str_Mask))
+            ind_Mask = (Mask > 0)
             N=int(np.sum(Mask))
-            Label = str(Label_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'') 
-            WMT = minc.Image(Label).data
+            #WMT = minc.Label(Label).data
+            WMT = sitk.GetArrayFromImage(sitk.ReadImage(Label))
                 
             nl_xfm = str(XFM_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
             spatial_priors = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
             for nl in range(0 , n_labels):
-                new_command = 'mincresample ' + path_sp + str(nl+1) + '.mnc -like  ' + Label + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_sp.mnc -clobber'
-                os.system(new_command)
-                spatial_prior = minc.Image(path_Temp + str(K) + '_tmp_sp.mnc').data
-                spatial_priors[0:N,nl] = spatial_prior[ind_WM]
+                spatial_prior = warp_and_read_prior(f"{path_sp}{nl+1}.mnc", Label, nl_xfm, f"{path_Temp}train_{i}_{K}_sp_{nl+1}.mnc")
+                spatial_priors[0:N,nl] = spatial_prior[ind_Mask]
                 
             if (t1 != ''):
                 str_T1 = str(T1_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                T1 = minc.Image(str_T1).data
-                new_command = 'mincresample ' + path_av_t1 + ' -like ' + Label + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_t1.mnc -clobber'
-                os.system(new_command)
-                av_T1 = minc.Image(path_Temp + str(K) + '_tmp_t1.mnc').data
+                #T1 = minc.Image(str_T1).data
+                T1 = sitk.GetArrayFromImage(sitk.ReadImage(str_T1))
+                av_T1 = warp_and_read_prior(path_av_t1, Label,nl_xfm, f"{path_Temp}train_{i}_{K}_av_t1.mnc")
                 T1[T1 < 1] = 1
                 T1[T1 > (image_range - 1)] = (image_range - 1)
                 T1_Label_probability = np.empty(shape = (N, n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    T1_Label_probability[:,nl] = T1_PDF_Label[np.round(T1[ind_WM]).astype(int),nl]
+                    T1_Label_probability[:,nl] = T1_PDF_Label[np.round(T1[ind_Mask]).astype(np.int),nl]
                 X_t1 = np.zeros(shape = (N , 2))
-                X_t1[0 : N , 0] = T1[ind_WM]
-                X_t1[0 : N , 1] = av_T1[ind_WM]
+                X_t1[0 : N , 0] = T1[ind_Mask]
+                X_t1[0 : N , 1] = av_T1[ind_Mask]
                 X_t1 = np.concatenate((X_t1 , T1_Label_probability) , axis = 1)
     
             if (t2 != ''):                
                 str_T2 = str(T2_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                T2 = minc.Image(str_T2).data
-                new_command = 'mincresample ' + path_av_t2 + ' -like ' + Label + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_t2.mnc -clobber'
-                os.system(new_command)
-                av_T2 = minc.Image(path_Temp + str(K) + '_tmp_t2.mnc').data
+                #T2 = minc.Image(str_T2).data
+                T2 = sitk.GetArrayFromImage(sitk.ReadImage(str_T2))
+                av_T2 = warp_and_read_prior(path_av_t2,Label,nl_xfm, f"{path_Temp}train_{i}_{K}_av_t2.mnc")
                 T2[T2 < 1] = 1
                 T2[T2 > (image_range - 1)] = (image_range - 1)
                 T2_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    T2_Label_probability[:,nl] = T2_PDF_Label[np.round(T2[ind_WM]).astype(int),nl]
+                    T2_Label_probability[:,nl] = T2_PDF_Label[np.round(T2[ind_Mask]).astype(np.int),nl]
                 if (t1 == ''):
                     X_t2 = np.zeros(shape = (N , 2))
-                    X_t2[0 : N , 0] = T2[ind_WM]
-                    X_t2[0 : N , 1] = av_T2[ind_WM]
+                    X_t2[0 : N , 0] = T2[ind_Mask]
+                    X_t2[0 : N , 1] = av_T2[ind_Mask]
                 if (t1 != ''):
                     X_t2 = np.zeros(shape = (N , 3))
-                    X_t2[0 : N , 0] = T2[ind_WM]
-                    X_t2[0 : N , 1] = av_T2[ind_WM]    
-                    X_t2[0 : N , 2] = T2[ind_WM] / T1[ind_WM]
+                    X_t2[0 : N , 0] = T2[ind_Mask]
+                    X_t2[0 : N , 1] = av_T2[ind_Mask]    
+                    X_t2[0 : N , 2] = T2[ind_Mask] / T1[ind_Mask]
                         
                 X_t2 = np.concatenate((X_t2 , T2_Label_probability) , axis = 1)
                     
             if (pd != ''):
                 str_PD = str(PD_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                PD = minc.Image(str_PD).data
-                new_command = 'mincresample ' + path_av_pd + ' -like ' + Label + ' -transform ' + nl_xfm + ' -invert_transform '+ path_Temp + str(K) + '_tmp_pd.mnc -clobber'
-                os.system(new_command)
-                av_PD = minc.Image(path_Temp + str(K) + '_tmp_pd.mnc').data
+                #PD = minc.Image(str_PD).data
+                PD = sitk.GetArrayFromImage(sitk.ReadImage(str_PD))
+                av_PD = warp_and_read_prior(path_av_pd, Label,nl_xfm, f"{path_Temp}train_{i}_{K}_av_pd.mnc")
                 PD[PD < 1] = 1
                 PD[PD > (image_range - 1)] = (image_range - 1)
                 PD_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    PD_Label_probability[:,nl] = PD_PDF_Label[np.round(PD[ind_WM]).astype(int),nl]
+                    PD_Label_probability[:,nl] = PD_PDF_Label[np.round(PD[ind_Mask]).astype(np.int),nl]
                 if (t1 == ''):
                     X_pd = np.zeros(shape = (N , 2))
-                    X_pd[0 : N , 0] = PD[ind_WM]
-                    X_pd[0 : N , 1] = av_PD[ind_WM]
+                    X_pd[0 : N , 0] = PD[ind_Mask]
+                    X_pd[0 : N , 1] = av_PD[ind_Mask]
                 if (t1 != ''):
                     X_pd = np.zeros(shape = (N , 3))
-                    X_pd[0 : N , 0] = PD[ind_WM]
-                    X_pd[0 : N , 1] = av_PD[ind_WM]                        
-                    X_pd[0 : N , 2] = PD[ind_WM] / T1[ind_WM]
+                    X_pd[0 : N , 0] = PD[ind_Mask]
+                    X_pd[0 : N , 1] = av_PD[ind_Mask]                        
+                    X_pd[0 : N , 2] = PD[ind_Mask] / T1[ind_Mask]
                         
                 X_pd = np.concatenate((X_pd , PD_Label_probability ) , axis = 1)                
                     
             if (flair != ''):
                 str_FLAIR = str(FLAIR_Files_Train[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                FLAIR = minc.Image(str_FLAIR).data
-                new_command = 'mincresample ' + path_av_flair + ' -like ' + Label + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_flair.mnc -clobber'
-                os.system(new_command)
-                av_FLAIR = minc.Image(path_Temp + str(K) + '_tmp_flair.mnc').data
+                #FLAIR = minc.Image(str_FLAIR).data
+                FLAIR = sitk.GetArrayFromImage(sitk.ReadImage(str_FLAIR))
+                av_FLAIR = warp_and_read_prior(path_av_flair, Label,nl_xfm, f"{path_Temp}train_{i}_{K}_av_flair.mnc")
                 FLAIR[FLAIR < 1] = 1
                 FLAIR[FLAIR > (image_range - 1)] = (image_range - 1)
                 FLAIR_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    FLAIR_Label_probability[:,nl] = FLAIR_PDF_Label[np.round(FLAIR[ind_WM]).astype(int),nl]
+                    FLAIR_Label_probability[:,nl] = FLAIR_PDF_Label[np.round(FLAIR[ind_Mask]).astype(np.int),nl]
                 if (t1 == ''):
                     X_flair = np.zeros(shape = (N , 3))
-                    X_flair[0 : N , 0] = FLAIR[ind_WM]
-                    X_flair[0 : N , 1] = av_FLAIR[ind_WM]
+                    X_flair[0 : N , 0] = FLAIR[ind_Mask]
+                    X_flair[0 : N , 1] = av_FLAIR[ind_Mask]
                 if (t1 != ''):
                     X_flair = np.zeros(shape = (N , 4))
-                    X_flair[0 : N , 0] = FLAIR[ind_WM]
-                    X_flair[0 : N , 1] = av_FLAIR[ind_WM]
-                    X_flair[0 : N , 2] = FLAIR[ind_WM] / T1[ind_WM]
+                    X_flair[0 : N , 0] = FLAIR[ind_Mask]
+                    X_flair[0 : N , 1] = av_FLAIR[ind_Mask]
+                    X_flair[0 : N , 2] = FLAIR[ind_Mask] / T1[ind_Mask]
                         
                 X_flair = np.concatenate((X_flair , FLAIR_Label_probability ) , axis = 1)
                 
-            else:
-                X = np.zeros(shape = (N , 0))
-                X = np.concatenate((X , spatial_priors) , axis = 1)  
+            X = np.zeros(shape = (N , 0))
+            X = np.concatenate((X , spatial_priors) , axis = 1)  
             if (t1 != ''):
                 X = np.concatenate((X , X_t1) , axis = 1)
             if (t2 != ''):
@@ -955,35 +1101,40 @@ def main(argv):
                 X = np.concatenate((X , X_flair) , axis = 1)
                 
             X_All = np.concatenate((X_All , X) , axis = 0)
-            Y = np.zeros(shape = (N , ))
-            Y[0 : N , ] = (WMT[ind_WM])    
+            Y = np.zeros(shape = (N , ),dtype=np.int32)
+            Y[0 : N , ] = (WMT[ind_Mask])    
             Y_All = np.concatenate((Y_All , Y) , axis = 0)
             
         # Training the Classifier
+        print("Training classifier: X_All:",X_All.shape," Y_All:",Y_All.shape)
         clf = clf.fit(X_All , Y_All)
 
-        saveFlag=0
+        saveFlag=1
+
         if saveFlag == 1:
-            from sklearn.externals import joblib
-            path_trained_classifiers='/data/ipl/ipl12/Mahsa/Neuromorphometrics/Trained_Classifiers/'
-            path_save_classifier=path_trained_classifiers+Classifier+'_CLS'+clsf+'_T1'+t1+'_T2'+t2+'_PD'+pd+'_FLAIR'+flair+'.pkl'    
+            
+            path_trained_classifiers = path_output 
+            path_save_classifier = path_trained_classifiers + os.sep + Classifier + '_CLS' + clsf + '_T1'+t1+'_T2'+t2+'_PD'+pd+'_FLAIR'+flair+'.pkl'    
+            print("Saving results to ",path_trained_classifiers)
+
             joblib.dump(clf,path_save_classifier)
             if (t1 != ''):
-                joblib.dump(T1_PDF_Label,path_trained_classifiers+'T1_Label.pkl')
+                joblib.dump(T1_PDF_Label,path_trained_classifiers+os.sep+'T1_Label.pkl')
             if (t2 != ''):
-                joblib.dump(T2_PDF_Label,path_trained_classifiers+'T2_Label.pkl')
+                joblib.dump(T2_PDF_Label,path_trained_classifiers+os.sep+'T2_Label.pkl')
             if (pd != ''):
-                joblib.dump(PD_PDF_Label,path_trained_classifiers+'PD_Label.pkl')
+                joblib.dump(PD_PDF_Label,path_trained_classifiers+os.sep+'PD_Label.pkl')
             if (flair != ''):
-                joblib.dump(FLAIR_PDF_Label,path_trained_classifiers+'FLAIR_Label.pkl')
+                joblib.dump(FLAIR_PDF_Label,path_trained_classifiers+os.sep+'FLAIR_Label.pkl')
             sys.exit()
             
         for i in range(0 , len(ID_Test)):
             str_Test = str(ID_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-            print('Segmenting Volumes: Subject: ID = ' + str_Test)
+            print(('Segmenting Volumes: Subject: ID = ' + str_Test))
             str_Mask = str(Mask_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'') .replace(" ",'')
-            Mask = minc.Image(str_Mask).data
-            ind_WM = (Mask > 0)
+            #Mask = minc.Label(str_Mask).data
+            Mask = sitk.GetArrayFromImage(sitk.ReadImage(str_Mask))
+            ind_Mask = (Mask > 0)
             nl_xfm = str(XFM_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
             N=int(np.sum(Mask))
               
@@ -992,98 +1143,92 @@ def main(argv):
                 str_T1 = str(T1_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
                 spatial_priors = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    new_command = 'mincresample ' + path_sp + str(nl+1) + '.mnc -like  ' + str_T1 + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_sp.mnc -clobber'
-                    os.system(new_command)
-                    spatial_prior = minc.Image(path_Temp + str(K) + '_tmp_sp.mnc').data
-                    spatial_priors[0:N,nl] = spatial_prior[ind_WM]
+                    spatial_prior = warp_and_read_prior(f"{path_sp}{nl+1}.mnc", str_T1, nl_xfm, f"{path_Temp}test_{i}_{K}_sp_{nl+1}.mnc")
+                    spatial_priors[0:N,nl] = spatial_prior[ind_Mask]
                 
-                T1 = minc.Image(str_T1).data
-                new_command = 'mincresample ' + path_av_t1 + ' -like ' + str_T1 + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_t1.mnc -clobber'
-                os.system(new_command)
-                av_T1 = minc.Image(path_Temp + str(K) + '_tmp_t1.mnc').data
+                #T1 = minc.Image(str_T1).data
+                T1 = sitk.GetArrayFromImage(sitk.ReadImage(str_T1))
+                av_T1 = warp_and_read_prior(path_av_t1, str_T1, nl_xfm, f"{path_Temp}test_{i}_{K}_av_t1.mnc")
                 T1[T1 < 1] = 1
                 T1[T1 > (image_range - 1)] = (image_range - 1)
                 T1_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    T1_Label_probability[:,nl] = T1_PDF_Label[np.round(T1[ind_WM]).astype(int),nl]
+                    T1_Label_probability[:,nl] = T1_PDF_Label[np.round(T1[ind_Mask]).astype(np.int),nl]
                 N = len(T1_Label_probability)
                 X_t1 = np.zeros(shape = (N , 2))
-                X_t1[0 : N , 0] = T1[ind_WM]
-                X_t1[0 : N , 1] = av_T1[ind_WM]
+                X_t1[0 : N , 0] = T1[ind_Mask]
+                X_t1[0 : N , 1] = av_T1[ind_Mask]
                 X_t1 = np.concatenate((X_t1 , T1_Label_probability) , axis = 1)
     
             if (t2 != ''):                
                 str_T2 = str(T2_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                T2 = minc.Image(str_T2).data
-                new_command = 'mincresample ' + path_av_t2 + ' -like ' + str_T2 + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_t2.mnc -clobber'
-                os.system(new_command)
-                av_T2 = minc.Image(path_Temp + str(K) + '_tmp_t2.mnc').data
+                #T2 = minc.Image(str_T2).data
+                T2 = sitk.GetArrayFromImage(sitk.ReadImage(str_T2))
+                av_T2 = warp_and_read_prior(path_av_t2, str_T2, nl_xfm, f"{path_Temp}test_{i}_{K}_av_t2.mnc")
                 T2[T2 < 1] = 1
                 T2[T2 > (image_range - 1)] = (image_range - 1)
                 T2_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    T2_Label_probability[:,nl] = T2_PDF_Label[np.round(T2[ind_WM]).astype(int),nl]
+                    T2_Label_probability[:,nl] = T2_PDF_Label[np.round(T2[ind_Mask]).astype(np.int),nl]
                 N = len(T2_Label_probability)
                 if (t1 == ''):
                     X_t2 = np.zeros(shape = (N , 2))
-                    X_t2[0 : N , 0] = T2[ind_WM]
-                    X_t2[0 : N , 1] = av_T2[ind_WM]
+                    X_t2[0 : N , 0] = T2[ind_Mask]
+                    X_t2[0 : N , 1] = av_T2[ind_Mask]
                 if (t1 != ''):
                     X_t2 = np.zeros(shape = (N , 3))
-                    X_t2[0 : N , 0] = T2[ind_WM]
-                    X_t2[0 : N , 1] = av_T2[ind_WM]    
-                    X_t2[0 : N , 2] = T2[ind_WM] / T1[ind_WM]                 
+                    X_t2[0 : N , 0] = T2[ind_Mask]
+                    X_t2[0 : N , 1] = av_T2[ind_Mask]    
+                    X_t2[0 : N , 2] = T2[ind_Mask] / T1[ind_Mask]                 
                 X_t2 = np.concatenate((X_t2 , T2_Label_probability) , axis = 1)
                     
             if (pd != ''):
                 str_PD = str(PD_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                PD = minc.Image(str_PD).data
-                new_command = 'mincresample ' + path_av_pd + ' -like ' + str_PD + ' -transform ' + nl_xfm + ' -invert_transform '+ path_Temp + str(K) + '_tmp_pd.mnc -clobber'
-                os.system(new_command)
-                av_PD = minc.Image(path_Temp + str(K) + '_tmp_pd.mnc').data
+                #PD = minc.Image(str_PD).data
+                PD = sitk.GetArrayFromImage(sitk.ReadImage(str_PD))
+                av_T2 = warp_and_read_prior(path_av_pd, str_PD, nl_xfm, f"{path_Temp}test_{i}_{K}_av_pd.mnc")
                 PD[PD < 1] = 1
                 PD[PD > (image_range - 1)] = (image_range - 1)
                 PD_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    PD_Label_probability[:,nl] = PD_PDF_Label[np.round(PD[ind_WM]).astype(int),nl]
+                    PD_Label_probability[:,nl] = PD_PDF_Label[np.round(PD[ind_Mask]).astype(np.int),nl]
                 N = len(PD_Label_probability)
                 if (t1 == ''):
                     X_pd = np.zeros(shape = (N , 2))
-                    X_pd[0 : N , 0] = PD[ind_WM]
-                    X_pd[0 : N , 1] = av_PD[ind_WM]
+                    X_pd[0 : N , 0] = PD[ind_Mask]
+                    X_pd[0 : N , 1] = av_PD[ind_Mask]
                 if (t1 != ''):
                     X_pd = np.zeros(shape = (N , 3))
-                    X_pd[0 : N , 0] = PD[ind_WM]
-                    X_pd[0 : N , 1] = av_PD[ind_WM]                        
-                    X_pd[0 : N , 2] = PD[ind_WM] / T1[ind_WM]  
+                    X_pd[0 : N , 0] = PD[ind_Mask]
+                    X_pd[0 : N , 1] = av_PD[ind_Mask]                        
+                    X_pd[0 : N , 2] = PD[ind_Mask] / T1[ind_Mask]  
                 X_pd = np.concatenate((X_pd , PD_Label_probability ) , axis = 1)                
                     
             if (flair != ''):
                 str_FLAIR = str(FLAIR_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                FLAIR = minc.Image(str_FLAIR).data
-                new_command = 'mincresample ' + path_av_flair + ' -like ' + str_FLAIR + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_flair.mnc -clobber'
-                os.system(new_command)
-                av_FLAIR = minc.Image(path_Temp + str(K) + '_tmp_flair.mnc').data
+                #FLAIR = minc.Image(str_FLAIR).data
+                FLAIR = sitk.GetArrayFromImage(sitk.ReadImage(str_FLAIR))
+                av_FLAIR = warp_and_read_prior(path_av_flair, str_FLAIR, nl_xfm, f"{path_Temp}test_{i}_{K}_av_flair.mnc")
                 FLAIR[FLAIR < 1] = 1
                 FLAIR[FLAIR > (image_range - 1)] = (image_range - 1)
                 FLAIR_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    FLAIR_Label_probability[:,nl] = FLAIR_PDF_Label[np.round(FLAIR[ind_WM]).astype(int),nl]
+                    FLAIR_Label_probability[:,nl] = FLAIR_PDF_Label[np.round(FLAIR[ind_Mask]).astype(np.int),nl]
                 N = len(FLAIR_Label_probability)
                 if (t1 == ''):
                     X_flair = np.zeros(shape = (N , 3))
-                    X_flair[0 : N , 0] = FLAIR[ind_WM]
-                    X_flair[0 : N , 1] = av_FLAIR[ind_WM]
+                    X_flair[0 : N , 0] = FLAIR[ind_Mask]
+                    X_flair[0 : N , 1] = av_FLAIR[ind_Mask]
                 if (t1 != ''):
                     X_flair = np.zeros(shape = (N , 4))
-                    X_flair[0 : N , 0] = FLAIR[ind_WM]
-                    X_flair[0 : N , 1] = av_FLAIR[ind_WM]
-                    X_flair[0 : N , 2] = FLAIR[ind_WM] / T1[ind_WM]     
+                    X_flair[0 : N , 0] = FLAIR[ind_Mask]
+                    X_flair[0 : N , 1] = av_FLAIR[ind_Mask]
+                    X_flair[0 : N , 2] = FLAIR[ind_Mask] / T1[ind_Mask]     
                 X_flair = np.concatenate((X_flair , FLAIR_Label_probability ) , axis = 1)
                 
             else:
                 X = np.zeros(shape = (N , 0))
-                X = np.concatenate((X , spatial_priors) , axis = 1)  
+                X = np.concatenate((X , spatial_priors) , axis = 1)
             if (t1 != ''):
                 X = np.concatenate((X , X_t1) , axis = 1)
             if (t2 != ''):
@@ -1091,22 +1236,32 @@ def main(argv):
             if (pd != ''):
                 X = np.concatenate((X , X_pd) , axis = 1)
             if (flair != ''):
-                X = np.concatenate((X , X_flair) , axis = 1)                 
+                X = np.concatenate((X , X_flair) , axis = 1)
    
-            Y = np.zeros(shape = (N , ))
+            Y = np.zeros(shape = (N , ), dtype=np.int32)
             Binary_Output = clf.predict(X)       
             Prob_Output=clf.predict_proba(X)            
             #### Saving results #########################################################################################################################            
-            WMT_auto = np.zeros(shape = (len(Mask) , len(Mask[0 , :]) , len(Mask[0 , 0 , :])))
-            WMT_auto[ind_WM] = Binary_Output[0 : N]
-            out = minc.Image(data = WMT_auto)
-            str_Labelo= path_output + Classifier + '_' + str_Test
-            out.save(name = str_Labelo + '_Label.mnc', imitate = str_Mask)
+            WMT_auto = np.zeros(shape = (len(Mask) , len(Mask[0 , :]) , len(Mask[0 , 0 , :])),dtype=np.int32)
+            WMT_auto[ind_Mask] = Binary_Output[0 : N]
+            
+            #out = minc.Label(data = WMT_auto)
+            str_Labelo= path_output +os.sep + Classifier + '_' + str_Test
+            #out.save(name = str_Labelo + '_Label.mnc', imitate = str_Mask)
+            
+            inputImage = sitk.ReadImage(str_Mask)
+            result_image = sitk.GetImageFromArray(WMT_auto)
+            result_image.CopyInformation(inputImage)
+            sitk.WriteImage(result_image,  str_Labelo + '_Label.mnc')
             
             Prob_auto = np.zeros(shape = (len(Mask) , len(Mask[0 , :]) , len(Mask[0 , 0 , :])))
-            Prob_auto[ind_WM] = Prob_Output[0 : N,1]
-            out = minc.Image(data = Prob_auto)
-            out.save(name = str_Labelo + '_P.mnc', imitate = str_Mask)
+            Prob_auto[ind_Mask] = Prob_Output[0 : N,1]
+            
+            #out = minc.Image(data = Prob_auto)
+            #out.save(name = str_Labelo + '_P.mnc', imitate = str_Mask)
+            result_image = sitk.GetImageFromArray(Prob_auto)
+            result_image.CopyInformation(inputImage)
+            sitk.WriteImage(result_image,  str_Labelo + '_P.mnc')
             
             if (t1 != ''):            
                 new_command = 'minc_qc.pl ' + str_T1 + ' --mask ' + str_Labelo + '_Label.mnc ' + str_Labelo + '_Label.jpg --big --clobber --spectral-mask  --image-range 0 200 --mask-range 0 ' + str(n_labels)
@@ -1121,140 +1276,142 @@ def main(argv):
                 new_command = 'minc_qc.pl ' + str_FLAIR+' '+ str_Labelo + '_FLAIR.jpg --big --clobber  --image-range 0 200 --mask-range 0 ' + str(n_labels)
                 os.system(new_command)
 ###########################################################################################################################################################################    
-    #path_trained_classifiers='/data/ipl/ipl12/Mahsa/Neuromorphometrics/Trained_Classifiers/'
-    path_sp=path_trained_classifiers+'SP_'
-    path_av_t1=path_trained_classifiers+'Av_T1.mnc'
-    path_av_t2=path_trained_classifiers+'Av_T2.mnc'
-    path_av_pd=path_trained_classifiers+'Av_PD.mnc'
-    path_av_flair=path_trained_classifiers+'Av_FLAIR.mnc'
-    if ClassificationMode == 'PT':       
-        from sklearn.externals import joblib            
+    #path_trained_classifiers='/data/ipl/ipl12/Mahsa/Neuromorphometrics/Trained_Classifiers_VP/'
+    elif ClassificationMode == 'PT':
+        path_sp   =path_trained_classifiers + os.sep + 'SP_'
+        path_av_t1=path_trained_classifiers + os.sep + 'Av_T1.mnc'
+        path_av_t2=path_trained_classifiers + os.sep + 'Av_T2.mnc'
+        path_av_pd=path_trained_classifiers + os.sep + 'Av_PD.mnc'
+        path_av_flair=path_trained_classifiers+os.sep + 'Av_FLAIR.mnc'
         
-        [ID_Test, XFM_Files_Test, xfmf, Mask_Files_Test, maskf, T1_Files_Test, t1, T2_Files_Test, t2, PD_Files_Test, pd, FLAIR_Files_Test, flair, Label_Files_Test, Label,cls_Files_Test, clsf] = get_addressess(TestList)            
-	path_saved_classifier=path_trained_classifiers+Classifier+'_CLS'+clsf+'_T1'+t1+'_T2'+t2+'_PD'+pd+'_FLAIR'+flair+'.pkl'
+        [ID_Test, XFM_Files_Test, xfmf, Mask_Files_Test, maskf, T1_Files_Test, t1, T2_Files_Test, t2, PD_Files_Test, pd, FLAIR_Files_Test, flair, Label_Files_Test, Label,cls_Files_Test, clsf] = get_addressess( TestList )
+        path_saved_classifier = path_trained_classifiers + os.sep + Classifier+'_CLS'+clsf+'_T1'+t1+'_T2'+t2+'_PD'+pd+'_FLAIR'+flair+'.pkl'
 ############## Preprocessing ####################################################################################################################################
-        if (doPreprocessingf == 'Y'):
+        if doPreprocessingf:
             preprocessed_list_address=doPreprocessing(path_nlin_mask,path_Temp, ID_Test, Label_Files_Test , Label, T1_Files_Test , t1 , T2_Files_Test , t2 , PD_Files_Test , pd , FLAIR_Files_Test , flair ,  path_av_t1 , path_av_t2 , path_av_pd , path_av_flair)
             [ID_Test, XFM_Files_Test, xfmf, Mask_Files_Test, maskf, T1_Files_Test, t1, T2_Files_Test, t2, PD_Files_Test, pd, FLAIR_Files_Test, flair, Label_Files_Test, Label,cls_Files_Test, clsf] = get_addressess(path_Temp+'Preprocessed.csv')
 ########## Loading Trained Classifier ##########################################################################################################################            
-        clf=joblib.load(path_saved_classifier)
+        #path_saved_classifier2='/data/ipl/ipl13/Mahsa/Tissue_Classification/Trained_Classifier_Comp/'+Classifier+'_CLS'+clsf+'_T1'+t1+'_T2'+t2+'_PD'+pd+'_FLAIR'+flair+'_compress.pkl'         
+
+        print(("Loading:",path_saved_classifier))
+        clf = joblib.load(path_saved_classifier)
+        # set maximum jobs to run in parallel
+        clf.n_jobs = n_jobs
+
+        #joblib.dump(clf,path_saved_classifier2,compress=9)
+
         K=0
         if (t1 != ''):
-            T1_PDF_Label=joblib.load(path_trained_classifiers+'T1_Label.pkl')
+            T1_PDF_Label=joblib.load(path_trained_classifiers+os.sep +'T1_Label.pkl')
         if (t2 != ''):
-            T2_PDF_Label=joblib.load(path_trained_classifiers+'T2_Label.pkl')
+            T2_PDF_Label=joblib.load(path_trained_classifiers+os.sep +'T2_Label.pkl')
         if (pd != ''):
-            PD_PDF_Label=joblib.load(path_trained_classifiers+'PD_Label.pkl')
+            PD_PDF_Label=joblib.load(path_trained_classifiers+os.sep +'PD_Label.pkl')
         if (flair != ''):
-            FLAIR_PDF_Label=joblib.load(path_trained_classifiers+'FLAIR_Label.pkl')
+            FLAIR_PDF_Label=joblib.load(path_trained_classifiers+os.sep +'FLAIR_Label.pkl')
+
+        print(("ID_Test:",ID_Test)) #DEBUG
+
         for i in range(0 , len(ID_Test)):
             str_Test = str(ID_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-            print('Segmenting Volumes: Subject: ID = ' + str_Test)
+            print(('Segmenting Volumes: Subject: ID = ' + str_Test))
             str_Mask = str(Mask_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'') .replace(" ",'')
-            Mask = minc.Image(str_Mask).data
-            ind_WM = (Mask > 0)
+            #Mask = minc.Label(str_Mask).data
+            Mask = sitk.GetArrayFromImage(sitk.ReadImage(str_Mask))
+            ind_Mask = (Mask > 0)
             nl_xfm = str(XFM_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
             N=int(np.sum(Mask))
-               
-                
+
             if (t1 != ''):
                 str_T1 = str(T1_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
                 spatial_priors = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    new_command = 'mincresample ' + path_sp + str(nl+1) + '.mnc -like  ' + str_T1 + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_sp.mnc -clobber'
-                                  
-                    os.system(new_command)
-                    spatial_prior = minc.Image(path_Temp + str(K) + '_tmp_sp.mnc').data
-                    spatial_priors[0:N,nl] = spatial_prior[ind_WM]
-                
-                
-                T1 = minc.Image(str_T1).data
-                new_command = 'mincresample ' + path_av_t1 + ' -like ' + str_T1 + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_t1.mnc -clobber'
-                os.system(new_command)
-                av_T1 = minc.Image(path_Temp + str(K) + '_tmp_t1.mnc').data
+                    spatial_prior = warp_and_read_prior(f"{path_sp}{nl+1}.mnc", str_T1, nl_xfm, f"{path_Temp}test_{i}_{K}_sp_{nl+1}.mnc")
+                    spatial_priors[0:N,nl] = spatial_prior[ind_Mask]
+
+                #T1 = minc.Image(str_T1).data
+                T1 = sitk.GetArrayFromImage(sitk.ReadImage(str_T1))
+                av_T1 = warp_and_read_prior(path_av_t1, str_T1, nl_xfm, f"{path_Temp}test_{i}_{K}_av_t1.mnc")
                 T1[T1 < 1] = 1
                 T1[T1 > (image_range - 1)] = (image_range - 1)
                 T1_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    T1_Label_probability[:,nl] = T1_PDF_Label[np.round(T1[ind_WM]).astype(int),nl]
+                    T1_Label_probability[:,nl] = T1_PDF_Label[np.round(T1[ind_Mask]).astype(np.int),nl]
                 N = len(T1_Label_probability)
                 X_t1 = np.zeros(shape = (N , 2))
-                X_t1[0 : N , 0] = T1[ind_WM]
-                X_t1[0 : N , 1] = av_T1[ind_WM]
+                X_t1[0 : N , 0] = T1[ind_Mask]
+                X_t1[0 : N , 1] = av_T1[ind_Mask]
                 X_t1 = np.concatenate((X_t1 , T1_Label_probability) , axis = 1)
     
-            if (t2 != ''):                
+            if (t2 != ''):
                 str_T2 = str(T2_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                T2 = minc.Image(str_T2).data
-                new_command = 'mincresample ' + path_av_t2 + ' -like ' + str_T2 + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_t2.mnc -clobber'
-                os.system(new_command)
-                av_T2 = minc.Image(path_Temp + str(K) + '_tmp_t2.mnc').data
+                #T2 = minc.Image(str_T2).data
+                T2 = sitk.GetArrayFromImage(sitk.ReadImage(str_T2))
+                av_T2 = warp_and_read_prior(path_av_t2, str_T2, nl_xfm, f"{path_Temp}test_{i}_{K}_av_t2.mnc")
                 T2[T2 < 1] = 1
                 T2[T2 > (image_range - 1)] = (image_range - 1)
                 T2_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    T2_Label_probability[:,nl] = T2_PDF_Label[np.round(T2[ind_WM]).astype(int),nl]
+                    T2_Label_probability[:,nl] = T2_PDF_Label[np.round(T2[ind_Mask]).astype(np.int),nl]
                 N = len(T2_Label_probability)
                 if (t1 == ''):
                     X_t2 = np.zeros(shape = (N , 2))
-                    X_t2[0 : N , 0] = T2[ind_WM]
-                    X_t2[0 : N , 1] = av_T2[ind_WM]
+                    X_t2[0 : N , 0] = T2[ind_Mask]
+                    X_t2[0 : N , 1] = av_T2[ind_Mask]
                 if (t1 != ''):
                     X_t2 = np.zeros(shape = (N , 3))
-                    X_t2[0 : N , 0] = T2[ind_WM]
-                    X_t2[0 : N , 1] = av_T2[ind_WM]    
-                    X_t2[0 : N , 2] = T2[ind_WM] / T1[ind_WM] 
+                    X_t2[0 : N , 0] = T2[ind_Mask]
+                    X_t2[0 : N , 1] = av_T2[ind_Mask]
+                    X_t2[0 : N , 2] = T2[ind_Mask] / T1[ind_Mask]
                 X_t2 = np.concatenate((X_t2 , T2_Label_probability) , axis = 1)
-                    
+
             if (pd != ''):
                 str_PD = str(PD_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                PD = minc.Image(str_PD).data
-                new_command = 'mincresample ' + path_av_pd + ' -like ' + str_PD + ' -transform ' + nl_xfm + ' -invert_transform '+ path_Temp + str(K) + '_tmp_pd.mnc -clobber'
-                os.system(new_command)
-                av_PD = minc.Image(path_Temp + str(K) + '_tmp_pd.mnc').data
+                #PD = minc.Image(str_PD).data
+                PD = sitk.GetArrayFromImage(sitk.ReadImage(str_PD))
+                av_PD = warp_and_read_prior(path_av_pd, str_PD, nl_xfm, f"{path_Temp}test_{i}_{K}_av_pd.mnc")
                 PD[PD < 1] = 1
                 PD[PD > (image_range - 1)] = (image_range - 1)
                 PD_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    PD_Label_probability[:,nl] = PD_PDF_Label[np.round(PD[ind_WM]).astype(int),nl]
+                    PD_Label_probability[:,nl] = PD_PDF_Label[np.round(PD[ind_Mask]).astype(np.int),nl]
                 N = len(PD_Label_probability)
                 if (t1 == ''):
                     X_pd = np.zeros(shape = (N , 2))
-                    X_pd[0 : N , 0] = PD[ind_WM]
-                    X_pd[0 : N , 1] = av_PD[ind_WM]
+                    X_pd[0 : N , 0] = PD[ind_Mask]
+                    X_pd[0 : N , 1] = av_PD[ind_Mask]
                 if (t1 != ''):
                     X_pd = np.zeros(shape = (N , 3))
-                    X_pd[0 : N , 0] = PD[ind_WM]
-                    X_pd[0 : N , 1] = av_PD[ind_WM]                        
-                    X_pd[0 : N , 2] = PD[ind_WM] / T1[ind_WM]    
-                X_pd = np.concatenate((X_pd , PD_Label_probability ) , axis = 1)                
-                    
+                    X_pd[0 : N , 0] = PD[ind_Mask]
+                    X_pd[0 : N , 1] = av_PD[ind_Mask]
+                    X_pd[0 : N , 2] = PD[ind_Mask] / T1[ind_Mask]
+                X_pd = np.concatenate((X_pd , PD_Label_probability ) , axis = 1)
+
             if (flair != ''):
                 str_FLAIR = str(FLAIR_Files_Test[i]).replace("[",'').replace("]",'').replace("'",'').replace(" ",'')
-                FLAIR = minc.Image(str_FLAIR).data
-                new_command = 'mincresample ' + path_av_flair + ' -like ' + str_FLAIR + ' -transform ' + nl_xfm + ' -invert_transform ' + path_Temp + str(K) + '_tmp_flair.mnc -clobber'
-                os.system(new_command)
-                av_FLAIR = minc.Image(path_Temp + str(K) + '_tmp_flair.mnc').data
+                #FLAIR = minc.Image(str_FLAIR).data
+                FLAIR = sitk.GetArrayFromImage(sitk.ReadImage(str_FLAIR))
+                av_FLAIR = warp_and_read_prior(path_av_flair, str_FLAIR, nl_xfm, f"{path_Temp}test_{i}_{K}_av_flair.mnc")
                 FLAIR[FLAIR < 1] = 1
                 FLAIR[FLAIR > (image_range - 1)] = (image_range - 1)
                 FLAIR_Label_probability = np.empty(shape = (N , n_labels) , dtype = float , order = 'C')
                 for nl in range(0 , n_labels):
-                    FLAIR_Label_probability[:,nl] = FLAIR_PDF_Label[np.round(FLAIR[ind_WM]).astype(int),nl]
+                    FLAIR_Label_probability[:,nl] = FLAIR_PDF_Label[np.round(FLAIR[ind_Mask]).astype(np.int),nl]
                 N = len(FLAIR_Label_probability)
                 if (t1 == ''):
                     X_flair = np.zeros(shape = (N , 3))
-                    X_flair[0 : N , 0] = FLAIR[ind_WM]
-                    X_flair[0 : N , 1] = av_FLAIR[ind_WM]
+                    X_flair[0 : N , 0] = FLAIR[ind_Mask]
+                    X_flair[0 : N , 1] = av_FLAIR[ind_Mask]
                 if (t1 != ''):
                     X_flair = np.zeros(shape = (N , 4))
-                    X_flair[0 : N , 0] = FLAIR[ind_WM]
-                    X_flair[0 : N , 1] = av_FLAIR[ind_WM]
-                    X_flair[0 : N , 2] = FLAIR[ind_WM] / T1[ind_WM]  
+                    X_flair[0 : N , 0] = FLAIR[ind_Mask]
+                    X_flair[0 : N , 1] = av_FLAIR[ind_Mask]
+                    X_flair[0 : N , 2] = FLAIR[ind_Mask] / T1[ind_Mask]
                 X_flair = np.concatenate((X_flair , FLAIR_Label_probability ) , axis = 1)
-                
+
             else:
                 X = np.zeros(shape = (N , 0))
-                X = np.concatenate((X , spatial_priors) , axis = 1)    
+                X = np.concatenate((X , spatial_priors) , axis = 1)
             if (t1 != ''):
                 X = np.concatenate((X , X_t1) , axis = 1)
             if (t2 != ''):
@@ -1262,35 +1419,37 @@ def main(argv):
             if (pd != ''):
                 X = np.concatenate((X , X_pd) , axis = 1)
             if (flair != ''):
-                X = np.concatenate((X , X_flair) , axis = 1)      
-                X = np.concatenate((X,X_flair) , axis = 1)
-    
+                X = np.concatenate((X , X_flair) , axis = 1)
+            print(("X:",X.shape)) # DEBUG
             Y = np.zeros(shape = (N , ))
-            Binary_Output = clf.predict(X)       
+            print("Rinning classifier...")
+            Binary_Output = clf.predict(X)
             #### Saving results #########################################################################################################################            
-            WMT_auto = np.zeros(shape = (len(Mask) , len(Mask[0 , :]) , len(Mask[0 , 0 , :])))
-            WMT_auto[ind_WM] = Binary_Output[0 : N]
-            out = minc.Image(data = WMT_auto)
-            str_Labelo= path_output + Classifier + '_' + str_Test
-            out.save(name = str_Labelo + '_Label.mnc', imitate = str_Mask)
+            WMT_auto = np.zeros(shape = (len(Mask) , len(Mask[0 , :]) , len(Mask[0 , 0 , :])), dtype=np.int32)
+            WMT_auto[ind_Mask] = Binary_Output[0 : N]
+            #out = minc.Label(data = WMT_auto)
+            str_Labelo = path_output + os.sep + Classifier + '_' + str_Test 
+            #out.save(name = str_Labelo + '_Label.mnc' , imitate = str_Mask)
             
-            new_command= 'mnc2nii ' + str_Labelo + '_Label.mnc ' + str_Labelo + '_Label.nii'
-            os.system(new_command)
+            inputImage = sitk.ReadImage(str_Mask)
+            result_image = sitk.GetImageFromArray(WMT_auto)
+            result_image.CopyInformation(inputImage)
+            sitk.WriteImage(result_image,  str_Labelo + '_Label.mnc')
+            
+            if nifti:
+                run_command('mnc2nii ' + str_Labelo + '_Label.mnc ' + str_Labelo + '_Label.nii')
             
             if (t1 != ''):            
-                new_command = 'minc_qc.pl ' + str_T1 + ' --mask ' + str_Labelo + '_Label.mnc ' + str_Labelo + '_Label.jpg --big --clobber --spectral-mask  --image-range 0 200 --mask-range 0 ' + str(n_labels)
-                os.system(new_command)
+                run_command('minc_qc.pl ' + str_T1 + ' --mask ' + str_Labelo + '_Label.mnc ' + str_Labelo + '_Label.jpg --big --clobber --spectral-mask  --image-range 0 200 --mask-range 0 ' + str(n_labels))
             if (t2 != ''): 
-                new_command = 'minc_qc.pl ' + str_T2  +' '+ str_Labelo + '_T2.jpg --big --clobber  --image-range 0 200 --mask-range 0 ' + str(n_labels)
-                os.system(new_command)
+                run_command('minc_qc.pl ' + str_T2  +' '+ str_Labelo + '_T2.jpg --big --clobber  --image-range 0 200 --mask-range 0 ' + str(n_labels))
             if (pd != ''): 
-                new_command = 'minc_qc.pl ' + str_PD +' '+ str_Labelo + '_PD.jpg --big --clobber  --image-range 0 200 --mask-range 0 ' + str(n_labels)
-                os.system(new_command)
+                run_command('minc_qc.pl ' + str_PD +' '+ str_Labelo + '_PD.jpg --big --clobber  --image-range 0 200 --mask-range 0 ' + str(n_labels))
             if (flair != ''): 
-                new_command = 'minc_qc.pl ' + str_FLAIR+' '+ str_Labelo + '_FLAIR.jpg --big --clobber  --image-range 0 200 --mask-range 0 ' + str(n_labels)
-                os.system(new_command)
+                run_command('minc_qc.pl ' + str_FLAIR+' '+ str_Labelo + '_FLAIR.jpg --big --clobber  --image-range 0 200 --mask-range 0 ' + str(n_labels))
 
-    print 'Segmentation Successfully Completed. '
+    print('Segmentation Successfully Completed. ')
+
 if __name__ == "__main__":
    main(sys.argv[1:])   
 
