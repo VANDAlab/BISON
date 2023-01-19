@@ -12,6 +12,10 @@ S1,t1.mnc,mask.mnc,xfm.xfm
 
 This version of the pipeline is also available [here](https://nist.mni.mcgill.ca/tissue-classification/)
 
+## New Version with 8 Labels 
+python ./BISON.py -c RF0 -m Pretrained_Library/ -o  Outputs/ -t Temp_Files/ -e PT -n List.csv  -p  Pretrained_Library/ -l 8
+
+
 ## Reference:
 - Dadar, M., & Collins, D. L. (2021). BISON: Brain tissue segmentation pipeline using T1‐weighted magnetic resonance images and a random forest classifier. Magnetic Resonance in Medicine, 85(4), 1881-1894.
 
