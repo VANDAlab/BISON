@@ -13,7 +13,7 @@ S1,t1.mnc,mask.mnc,xfm.xfm
 This version of the pipeline is also available [here](https://nist.mni.mcgill.ca/tissue-classification/)
 
 ## New Version with 8 Labels 
-python ./BISON.py -c RF0 -m Pretrained_Library/ -o  Outputs/ -t Temp_Files/ -e PT -n List.csv  -p  Pretrained_Library/ -l 8
+python ./BISON_L8.py -c RF0 -m Pretrained_Library/ -o  Outputs/ -t Temp_Files/ -e PT -n List.csv  -p  Pretrained_Library/ -l 8
 
 
 ## Reference:
